@@ -56,32 +56,64 @@ float radToDeg(float rad) {
   return rad * 180.0 / PI;
 }
 
-struct IKResult {
-  float roll_inv;
-  float pitch_inv;
-  float yaw_inv;
+struct Quat {
+  float w, x, y, z;
 };
 
-// X -> Roll -> Alfa
-// Y -> Pitch -> Beta
-// Z -> Yaw -> Gamma
-IKResult getInverseKinematics(float pitch, float roll, float yaw){
-  Matrix3f R;
-  Matrix3f RT;
-  R << cosD(roll)*cosD(pitch),  cosD(roll)*sinD(pitch)*sinD(yaw) - sinD(roll)*cosD(yaw),   cosD(roll)*sinD(pitch)*cosD(yaw) + sinD(roll)*sinD(yaw),
-       sinD(roll)*cosD(pitch),  sinD(roll)*sinD(pitch)*sinD(yaw) + cosD(roll)*cosD(yaw),   sinD(roll)*sinD(pitch)*cosD(yaw) - cosD(roll)*sinD(yaw),
-          -sinD(pitch),                            cosD(pitch)*sinD(yaw),                                  cosD(pitch)*cosD(yaw);
-  RT << 0, 0, 1,
-        0, -1, 0,
-        1, 0, 0; 
-  Matrix3f Rcamera = R * RT;
-  Matrix3f Rinv = RT * Rcamera.transpose();
+Quat quatNormalize(Quat q) {
+  float n = sqrtf(q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z);
+  if (n == 0) n = 1;
+  q.w /= n; q.x /= n; q.y /= n; q.z /= n;
+  return q;
+}
 
-  IKResult result;
-  result.roll_inv = radToDeg(atan2f(Rinv(1,0), Rinv(0,0)));
-  result.pitch_inv = radToDeg(asinf(-Rinv(2,0)));
-  result.yaw_inv = radToDeg(atan2f(Rinv(2,1), Rinv(2,2)));
-  return result;
+Quat quatInverse(Quat q) {
+  return { q.w, -q.x, -q.y, -q.z };
+}
+
+Quat quatMultiply(Quat a, Quat b) {
+  Quat r;
+  r.w = a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z;
+  r.x = a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y;
+  r.y = a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x;
+  r.z = a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w;
+  return r;
+}
+
+struct CompensatingAngles {
+  float roll;
+  float pitch;
+  float yaw;
+};
+
+CompensatingAngles getCompensatingAngles(Quat q) {
+    q = quatNormalize(q);
+    Quat q_inv = quatInverse(q);
+    
+    // Roll
+    float sinr_cosp = 2 * (q_inv.w * q_inv.x + q_inv.y * q_inv.z);
+    float cosr_cosp = 1 - 2 * (q_inv.x * q_inv.x + q_inv.y * q_inv.y);
+    float roll = atan2f(sinr_cosp, cosr_cosp);
+
+    // Pitch
+    float sinp = 2 * (q_inv.w * q_inv.y - q_inv.z * q_inv.x);
+    float pitch;
+    if (abs(sinp) >= 1)
+        pitch = copysignf(M_PI / 2, sinp); 
+    else
+        pitch = asinf(sinp);
+
+    // Yaw 
+    float siny_cosp = 2 * (q_inv.w * q_inv.z + q_inv.x * q_inv.y);
+    float cosy_cosp = 1 - 2 * (q_inv.y * q_inv.y + q_inv.z * q_inv.z);
+    float yaw = atan2f(siny_cosp, cosy_cosp);
+
+    CompensatingAngles result;
+    result.roll = radToDeg(roll);
+    result.pitch = radToDeg(pitch);
+    result.yaw = radToDeg(yaw);
+    
+    return result;
 }
 
 // --- TASK 1 SENSOR READING & CALCUTATIONS---
@@ -97,27 +129,31 @@ void Task_BMO(void *parameter){
     if (BNO085.getSensorEvent() == true) {
       if (BNO085.getSensorEventID() == SENSOR_REPORTID_ROTATION_VECTOR) {
         
-        float pitch = (BNO085.getPitch()) * 180.0 / PI;
-        float yaw = (BNO085.getYaw()) * 180.0 / PI;
-        float roll = (BNO085.getRoll()) * 180.0 / PI;
+        // float Y = (BNO085.getPitch()) * 180.0 / PI;
+        // float Z = (BNO085.getYaw()) * 180.0 / PI;
+        // float X = (BNO085.getRoll()) * 180.0 / PI;
 
-        IKResult ik = getInverseKinematics(pitch + 180.0, yaw + 180.0, roll + 180.0);
-
-        // float quatReal = BNO085.getQuatReal();
+        float quatI = BNO085.getQuatI();
+        float quatJ = BNO085.getQuatJ();
+        float quatK = BNO085.getQuatK();
+        float quatReal = BNO085.getQuatReal();
         // float quatRadianAccuracy = BNO085.getQuatRadianAccuracy();
 
-        Serial.print(ik.roll_inv, 3);
+        Quat current_q = {quatReal, quatI, quatJ, quatK};
+        CompensatingAngles ik = getCompensatingAngles(current_q);
+        Serial.print(quatReal, 3);
         Serial.print(F(","));
-        Serial.print(ik.pitch_inv, 3);
+        Serial.print(quatI, 3);
         Serial.print(F(","));
-        Serial.print(ik.yaw_inv, 3);
+        Serial.print(quatJ, 3);
         Serial.print(F(","));
-        Serial.print(roll, 3);
+        Serial.print(quatK, 3);
         Serial.print(F(","));
-        Serial.print(pitch, 3);
+        Serial.print(ik.yaw, 3);
         Serial.print(F(","));
-        Serial.print(yaw, 3);
-
+        Serial.print(ik.pitch, 3);
+        Serial.print(F(","));
+        Serial.print(ik.roll, 3);
         Serial.println();
       }
     }
@@ -251,7 +287,7 @@ void setup() {
   Serial.println("Reading events");
   delay(100);
 
-  xTaskCreatePinnedToCore(Task_BMO, "Gyro", 4096, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(Task_BMO, "Gyro", 8192, NULL, 1, NULL, 0);
 }
 
 void loop() {
